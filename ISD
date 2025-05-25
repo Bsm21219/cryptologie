@@ -1,0 +1,246 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <math.h>
+#include <sys/time.h>
+
+// Structure pour représenter un polynôme en GF(2)
+typedef struct {
+    unsigned long* coeff;
+    int degree;
+    int max_degree;
+} Polynomial;
+
+// Fonctions polynomiales de base
+Polynomial* create_polynomial(int max_degree) {
+    Polynomial* p = (Polynomial*)malloc(sizeof(Polynomial));
+    p->max_degree = max_degree;
+    p->degree = -1;
+    int words = (max_degree + 63) / 64;
+    p->coeff = (unsigned long*)calloc(words, sizeof(unsigned long));
+    return p;
+}
+
+void free_polynomial(Polynomial* p) {
+    if (p) {
+        free(p->coeff);
+        free(p);
+    }
+}
+
+int get_coeff(Polynomial* p, int degree) {
+    if (degree > p->max_degree || degree < 0) return 0;
+    int word = degree / 64;
+    int bit = degree % 64;
+    return (p->coeff[word] >> bit) & 1;
+}
+
+void set_coeff(Polynomial* p, int degree, int value) {
+    if (degree > p->max_degree) return;
+    int word = degree / 64;
+    int bit = degree % 64;
+    if (value) {
+        p->coeff[word] |= (1UL << bit);
+        if (degree > p->degree) p->degree = degree;
+    } else {
+        p->coeff[word] &= ~(1UL << bit);
+        if (degree == p->degree) {
+            p->degree = -1;
+            for (int i = p->max_degree; i >= 0; i--) {
+                if (get_coeff(p, i)) {
+                    p->degree = i;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// Fonctions matricielles de base
+int** create_matrix(int rows, int cols) {
+    int** mat = (int**)malloc(rows * sizeof(int*));
+    for (int i = 0; i < rows; i++) {
+        mat[i] = (int*)calloc(cols, sizeof(int));
+    }
+    return mat;
+}
+
+void free_matrix(int** mat, int rows) {
+    for (int i = 0; i < rows; i++) {
+        free(mat[i]);
+    }
+    free(mat);
+}
+
+void print_matrix(int** mat, int rows, int cols) {
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            printf("%d ", mat[i][j]);
+        }
+        printf("\n");
+    }
+}
+
+int hamming_weight(int* vec, int len) {
+    int weight = 0;
+    for (int i = 0; i < len; i++) {
+        weight += vec[i];
+    }
+    return weight;
+}
+
+void generate_random_matrix(int** mat, int rows, int cols, double density) {
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            mat[i][j] = (rand() / (double)RAND_MAX) < density ? 1 : 0;
+        }
+    }
+}
+
+void generate_error_vector(int* error, int n, int t) {
+    memset(error, 0, n * sizeof(int));
+    int positions_set = 0;
+    while (positions_set < t) {
+        int pos = rand() % n;
+        if (error[pos] == 0) {
+            error[pos] = 1;
+            positions_set++;
+        }
+    }
+}
+
+void matrix_vector_mult(int** mat, int* vec, int* result, int rows, int cols) {
+    for (int i = 0; i < rows; i++) {
+        result[i] = 0;
+        for (int j = 0; j < cols; j++) {
+            result[i] ^= (mat[i][j] & vec[j]);
+        }
+    }
+}
+
+// Conversion entre matrice et représentation compacte
+void matrix_to_compact(int** matrix, int rows, int cols, unsigned long* compact) {
+    int total_bits = rows * cols;
+    int words = (total_bits + 63) / 64;
+    memset(compact, 0, words * sizeof(unsigned long));
+
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            int bit_pos = i * cols + j;
+            if (matrix[i][j]) {
+                compact[bit_pos / 64] |= (1UL << (bit_pos % 64));
+            }
+        }
+    }
+}
+
+// Algorithme ISD optimisé
+int* optimized_isd(int** H, int* syndrome, int n, int k, int t, int max_iterations,
+                   int* iterations, double* exec_time) {
+    int m = n - k;
+    struct timeval start, end;
+    gettimeofday(&start, NULL);
+
+    int total_bits = m * n;
+    int words = (total_bits + 63) / 64;
+    unsigned long* H_compact = (unsigned long*)calloc(words, sizeof(unsigned long));
+    matrix_to_compact(H, m, n, H_compact);
+
+    int* solution = (int*)calloc(n, sizeof(int));
+    int* computed_syndrome = (int*)calloc(m, sizeof(int));
+    int* candidate = (int*)calloc(n, sizeof(int));
+
+    for (*iterations = 0; *iterations < max_iterations; (*iterations)++) {
+        generate_error_vector(candidate, n, t);
+        matrix_vector_mult(H, candidate, computed_syndrome, m, n);
+
+        int match = 1;
+        for (int i = 0; i < m; i++) {
+            if (computed_syndrome[i] != syndrome[i]) {
+                match = 0;
+                break;
+            }
+        }
+
+        if (match) {
+            memcpy(solution, candidate, n * sizeof(int));
+            break;
+        }
+    }
+
+    gettimeofday(&end, NULL);
+    *exec_time = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000.0;
+
+    free(H_compact);
+    free(candidate);
+    free(computed_syndrome);
+
+    if (*iterations == max_iterations) {
+        free(solution);
+        return NULL;
+    }
+
+    return solution;
+}
+
+// Fonction de test complète
+void run_full_test(int n, int k, int t, int max_iter) {
+    printf("\n=== TEST n=%d, k=%d, t=%d ===\n", n, k, t);
+
+    int m = n - k;
+    double density = 0.5;
+
+    int** H = create_matrix(m, n);
+    generate_random_matrix(H, m, n, density);
+
+    int* error = (int*)calloc(n, sizeof(int));
+    int* syndrome = (int*)calloc(m, sizeof(int));
+    generate_error_vector(error, n, t);
+    matrix_vector_mult(H, error, syndrome, m, n);
+
+    int iterations = 0;
+    double exec_time = 0;
+    int* solution = optimized_isd(H, syndrome, n, k, t, max_iter, &iterations, &exec_time);
+
+    if (solution) {
+        printf("Solution trouvée en %d itérations (%.3f sec)\n", iterations, exec_time);
+        printf("Poids solution: %d\n", hamming_weight(solution, n));
+
+        int* check_syndrome = (int*)calloc(m, sizeof(int));
+        matrix_vector_mult(H, solution, check_syndrome, m, n);
+
+        int valid = 1;
+        for (int i = 0; i < m; i++) {
+            if (check_syndrome[i] != syndrome[i]) {
+                valid = 0;
+                break;
+            }
+        }
+
+        printf("Solution %svalide\n", valid ? "" : "in");
+        free(check_syndrome);
+        free(solution);
+    } else {
+        printf("Aucune solution trouvée après %d itérations (%.3f sec)\n", iterations, exec_time);
+    }
+
+    free_matrix(H, m);
+    free(error);
+    free(syndrome);
+}
+
+int main() {
+    srand(time(NULL));
+
+    // Tests petits
+    run_full_test(12, 6, 2, 10000);
+    run_full_test(16, 8, 3, 50000);
+    run_full_test(20, 10, 4, 100000);
+    run_full_test(24, 12, 4, 200000);
+
+    // Grand test (McEliece facile)
+    run_full_test(400, 200, 20, 10000000);
+
+    return 0;
+}
